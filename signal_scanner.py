@@ -281,6 +281,19 @@ def send_telegram(signal: dict, token: str, chat: str):
         print(f"  (telegram send failed: {e})", file=sys.stderr)
 
 
+def send_telegram_text(token, chat, text):
+    """Send a plain text reply (used for bot commands)."""
+    try:
+        import urllib.request
+        import urllib.parse
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text,
+                                       "disable_web_page_preview": "true"}).encode()
+        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10)
+    except Exception as e:
+        print(f"  (telegram reply failed: {e})", file=sys.stderr)
+
+
 def send_telegram_photo(signal, df_ltf, token, chat):
     """Render a TradingView-style chart and send it with the signal as caption."""
     try:
@@ -328,8 +341,114 @@ def emit(signal: dict, webhook, tg_token, tg_chat, df_ltf=None):
             print(f"  (webhook failed: {e})", file=sys.stderr)
 
 
-def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_chat):
+HELP_TEXT = (
+    "OTE Signal Bot — commands\n"
+    "/status    — scanner status & open positions\n"
+    "/positions — list open trades\n"
+    "/last      — last 5 signals\n"
+    "/symbols   — instruments being scanned\n"
+    "/test      — send a sample signal with chart\n"
+    "/mute      — pause signal alerts\n"
+    "/unmute    — resume signal alerts\n"
+    "/help      — this message"
+)
+
+
+def _recent_signals(n=5):
+    if not os.path.exists(LOG_FILE):
+        return []
+    out = []
+    with open(LOG_FILE) as f:
+        for line in f:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                pass
+    return out[-n:]
+
+
+def _command_reply(cmd, state, cfg):
+    """Build the text reply for a command (state may be mutated for mute)."""
+    if cmd in ("/start", "/help"):
+        return HELP_TEXT
+    if cmd == "/status":
+        ops = state.get("open_positions", {})
+        return (f"Status: {'MUTED' if state.get('muted') else 'active'}\n"
+                f"Symbols: {len(cfg.get('symbols', []))} | "
+                f"TF: {','.join(cfg.get('timeframes', []))}\n"
+                f"Open positions: {len(ops)}\n"
+                f"Last scan: {state.get('last_scan', 'n/a')}")
+    if cmd == "/positions":
+        ops = state.get("open_positions", {})
+        if not ops:
+            return "No open positions."
+        lines = [f"{k} {p['direction'].upper()} entry {p['entry']} "
+                 f"SL {p['stop']} TP2 {p['target']}"
+                 + (" [TP1 hit]" if p.get("tp1_hit") else "")
+                 for k, p in list(ops.items())[:15]]
+        return "Open positions:\n" + "\n".join(lines)
+    if cmd == "/last":
+        sigs = _recent_signals(5)
+        if not sigs:
+            return "No signals logged yet."
+        return "Last signals:\n" + "\n".join(
+            f"{s.get('symbol')} {s.get('timeframe','')} {s.get('type','')} "
+            f"{(s.get('direction') or '').upper()} @ {s.get('entry', s.get('exit',''))}"
+            for s in sigs)
+    if cmd == "/symbols":
+        return "Scanning: " + ", ".join(cfg.get("symbols", []))
+    if cmd == "/mute":
+        return "Muted — no more signal alerts until /unmute."
+    if cmd == "/unmute":
+        return "Unmuted — signal alerts resumed."
+    return "Unknown command. Send /help."
+
+
+def handle_commands(token, chat, cfg):
+    """Poll Telegram for new commands and reply. Returns how many were handled."""
+    if not (token and chat):
+        return 0
     state = load_state()
+    off = state.get("tg_offset", 0)
+    handled = 0
+    try:
+        import urllib.request
+        url = (f"https://api.telegram.org/bot{token}/getUpdates?offset={off}&timeout=0")
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode())
+    except Exception as e:
+        print(f"  (command poll failed: {e})", file=sys.stderr)
+        return 0
+    for upd in data.get("result", []):
+        off = max(off, upd.get("update_id", 0) + 1)
+        msg = upd.get("message") or {}
+        text = (msg.get("text") or "").strip()
+        if not text.startswith("/"):
+            continue
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        if chat_id and str(chat) and chat_id != str(chat):
+            continue
+        cmd = text.split()[0].lower().split("@")[0]
+        if cmd == "/test":
+            run_test(token, chat, None)
+        elif cmd in ("/mute", "/unmute"):
+            state["muted"] = (cmd == "/mute")
+            send_telegram_text(token, chat, _command_reply(cmd, state, cfg))
+        else:
+            send_telegram_text(token, chat, _command_reply(cmd, state, cfg))
+        handled += 1
+    state["tg_offset"] = off
+    save_state(state)
+    print(f"  commands handled: {handled}")
+    return handled
+
+
+def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_chat):
+    # Answer any pending bot commands first (so /status etc. are responsive).
+    handle_commands(tg_token, tg_chat,
+                    {"symbols": symbols, "timeframes": timeframes, "rr": rr})
+    state = load_state()
+    muted = state.get("muted", False)
     open_positions = state.get("open_positions", {})
     seen = set(state.get("seen_entries", []))
 
@@ -349,7 +468,10 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
             if pos:
                 exit_sig = check_open_position(pos, df_ltf)
                 if exit_sig:
-                    emit(exit_sig, webhook, tg_token, tg_chat, df_ltf=df_ltf)
+                    if not muted:
+                        emit(exit_sig, webhook, tg_token, tg_chat, df_ltf=df_ltf)
+                    else:
+                        print(f"[muted] {_format(exit_sig).splitlines()[0]}")
                     if exit_sig["type"] == "EXIT":
                         open_positions.pop(key, None)
                     else:                       # TP1 partial -> keep running to TP2
@@ -362,12 +484,16 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
             if sig and key not in open_positions:
                 k = f"{key}|{sig['bar_time']}|{sig['direction']}"
                 if k not in seen:
-                    emit(sig, webhook, tg_token, tg_chat, df_ltf=df_ltf)
+                    if not muted:
+                        emit(sig, webhook, tg_token, tg_chat, df_ltf=df_ltf)
+                    else:
+                        print(f"[muted] {_format(sig).splitlines()[0]}")
                     seen.add(k)
                     open_positions[key] = sig
 
     state["open_positions"] = open_positions
     state["seen_entries"] = list(seen)[-500:]
+    state["last_scan"] = datetime.now(timezone.utc).isoformat()
     save_state(state)
 
 
@@ -451,6 +577,8 @@ def main():
     ap.add_argument("--watch", action="store_true", help="loop forever")
     ap.add_argument("--test", action="store_true",
                     help="preview how signals are formatted (no real scan)")
+    ap.add_argument("--commands", action="store_true",
+                    help="poll Telegram for bot commands once and exit")
     ap.add_argument("--webhook", default=None)
     ap.add_argument("--telegram-token", default=None)
     ap.add_argument("--telegram-chat", default=None)
@@ -458,6 +586,13 @@ def main():
 
     if args.test:
         run_test(args.telegram_token, args.telegram_chat, args.webhook)
+        return
+
+    if args.commands:
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+        timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip() in TF_CONFIG]
+        handle_commands(args.telegram_token, args.telegram_chat,
+                        {"symbols": symbols, "timeframes": timeframes, "rr": args.rr})
         return
 
     if not acquire_lock():

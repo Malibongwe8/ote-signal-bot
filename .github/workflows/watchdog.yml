@@ -1,0 +1,69 @@
+name: OTE Watchdog
+
+# Self-healing supervisor. GitHub cron is best-effort: runs can be delayed, and
+# scheduled workflows get auto-disabled after 60 days of repo inactivity. This
+# watchdog checks whether the main scan has actually been running; if it has
+# stalled or been disabled, it re-enables and re-triggers it and pings Telegram.
+# Best-effort: the watchdog runs on the same scheduler, so it is a redundant
+# safety net, not an absolute uptime guarantee.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  actions: write     # to re-trigger / re-enable the scan workflow
+  contents: read
+
+concurrency:
+  group: ote-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check scan freshness and self-heal
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          MAX_AGE=1500   # 25 minutes with no scan = considered stalled
+
+          # 1) Re-enable scan.yml if GitHub disabled it (e.g. 60-day inactivity)
+          STATE=$(gh workflow view scan.yml -R "$REPO" --json state --jq .state 2>/dev/null || echo "unknown")
+          echo "scan.yml state: $STATE"
+          if [ "$STATE" = "disabled_manually" ] || [ "$STATE" = "disabled_inactivity" ]; then
+            gh workflow enable scan.yml -R "$REPO" || true
+            curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d chat_id="${TG_CHAT}" \
+              --data-urlencode text="Watchdog: scan workflow was disabled (${STATE}); re-enabled it." >/dev/null || true
+          fi
+
+          # 2) How long since the last scan run started?
+          LAST=$(gh run list --workflow=scan.yml -R "$REPO" --limit 1 --json createdAt --jq '.[0].createdAt' 2>/dev/null || echo "")
+          echo "last run: ${LAST:-none}"
+          NOW=$(date -u +%s)
+          if [ -n "$LAST" ]; then
+            THEN=$(date -u -d "$LAST" +%s 2>/dev/null || echo 0)
+            AGE=$(( NOW - THEN ))
+          else
+            AGE=999999
+          fi
+          echo "age: ${AGE}s"
+
+          # 3) If stalled, re-trigger a scan and alert
+          if [ "$AGE" -gt "$MAX_AGE" ]; then
+            gh workflow run scan.yml -R "$REPO" || true
+            curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              -d chat_id="${TG_CHAT}" \
+              --data-urlencode text="Watchdog: no scan for ${AGE}s — re-triggered scan.yml." >/dev/null || true
+            echo "Re-triggered scan."
+          else
+            echo "Healthy."
+          fi

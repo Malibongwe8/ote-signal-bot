@@ -19,6 +19,34 @@ whether or not your own computer is on.
   OTE leg plus a volatility (ATR) buffer. **TP1 = 1R** (scale out 50%, move SL to
   breakeven), **TP2 = the opposing structural extreme, at least 2R**.
 
+## Telegram commands
+
+Message the bot (in the configured chat) any of these — it replies within ~5 minutes
+(it polls for commands at the start of every scan):
+
+| Command | What it does |
+|---|---|
+| `/help` `/start` | List the commands |
+| `/status` | Scanner status, symbol/TF count, open positions, last scan time |
+| `/positions` | List currently open trades (entry / SL / TP2) |
+| `/last` | Show the last 5 signals |
+| `/symbols` | List the instruments being scanned |
+| `/test` | Send a sample signal with a chart |
+| `/mute` | Pause signal alerts (scanning continues silently) |
+| `/unmute` | Resume signal alerts |
+
+## Staying alive / self-healing
+
+- **`scan.yml`** runs the scan every 5 minutes on GitHub's servers.
+- **`watchdog.yml`** is the self-healing supervisor. Every 15 minutes it checks
+  whether `scan.yml` has actually run. If it has **stalled** (no run for 25 min)
+  or GitHub **disabled** it (e.g. 60-day inactivity), the watchdog **re-enables
+  and re-triggers** the scan and pings you on Telegram. The scanner process also
+  catches its own errors and keeps looping rather than dying.
+- **Honest limit:** GitHub cron is best-effort. Runs can be delayed, and the
+  watchdog runs on the same scheduler, so this is a strong safety net — **not an
+  absolute uptime guarantee.** For true 24/7 you'd still want a VPS.
+
 ## Setup (one time)
 
 1. **Add your Telegram credentials as repo secrets** (Settings → Secrets and
