@@ -567,6 +567,31 @@ def run_test(tg_token, tg_chat, webhook):
         print("No Telegram token configured -> PREVIEW ONLY, nothing was sent.")
 
 
+def _dispatch_successor():
+    """Queue the next scan.yml run so the chain never depends on GitHub's cron
+    (which does not fire reliably here). Uses GH_DISPATCH_TOKEN +
+    GITHUB_REPOSITORY. With the workflow's concurrency group, the successor stays
+    pending and starts when this run ends."""
+    token = os.environ.get("GH_DISPATCH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    ref = os.environ.get("GH_DISPATCH_REF", "main")
+    if not (token and repo):
+        return
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/actions/workflows/scan.yml/dispatches",
+            data=json.dumps({"ref": ref}).encode(),
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json",
+                     "Content-Type": "application/json"},
+            method="POST")
+        urllib.request.urlopen(req, timeout=20).read()
+        print("  successor scan dispatched (chain continues).")
+    except Exception as e:
+        print(f"  (successor dispatch failed: {e})", file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser(description="Multi-TF OTE+SMC signal scanner")
     ap.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
@@ -575,6 +600,13 @@ def main():
     ap.add_argument("--min-confluence", type=int, default=2)
     ap.add_argument("--interval", type=int, default=60, help="seconds between scans")
     ap.add_argument("--watch", action="store_true", help="loop forever")
+    ap.add_argument("--loop", action="store_true",
+                    help="run for --max-runtime seconds, scanning every --interval, "
+                         "then re-dispatch the next run (GitHub self-chaining)")
+    ap.add_argument("--max-runtime", type=int, default=19800,
+                    help="seconds to run in --loop mode (default 5h30m)")
+    ap.add_argument("--dispatch-every", type=int, default=1800,
+                    help="seconds between successor re-dispatches in --loop mode")
     ap.add_argument("--test", action="store_true",
                     help="preview how signals are formatted (no real scan)")
     ap.add_argument("--commands", action="store_true",
@@ -603,10 +635,37 @@ def main():
     tgt = "Telegram" if (args.telegram_token and args.telegram_chat) else \
           ("webhook" if args.webhook else "console only")
     print(f"Scanner: {symbols} | TF {timeframes} | RR {args.rr} | delivery: {tgt}")
-    print(f"Mode: {'continuous' if args.watch else 'single scan'}\n")
+    mode = "continuous" if args.watch else ("loop (self-chaining)" if args.loop else "single scan")
+    print(f"Mode: {mode}\n")
 
     args_kw = dict(webhook=args.webhook, tg_token=args.telegram_token,
                    tg_chat=args.telegram_chat)
+
+    if args.loop:
+        # Self-chaining run: queue the successor immediately (it waits in the
+        # concurrency group), then scan every --interval until --max-runtime.
+        _dispatch_successor()
+        deadline = time.time() + args.max_runtime
+        last_dispatch = time.time()
+        scans = 0
+        while time.time() < deadline:
+            started = time.time()
+            try:
+                scan_once(symbols, timeframes, args.rr, args.min_confluence, **args_kw)
+                scans += 1
+            except KeyboardInterrupt:
+                print("\nStopped by user.")
+                break
+            except Exception as e:
+                print(f"  (scan error: {e})", file=sys.stderr)
+            # Keep a fresh successor queued in case this run dies early.
+            if time.time() - last_dispatch >= args.dispatch_every:
+                _dispatch_successor()
+                last_dispatch = time.time()
+            time.sleep(max(1, args.interval - (time.time() - started)))
+        print(f"Loop window finished after {scans} scans.")
+        return
+
     scan_once(symbols, timeframes, args.rr, args.min_confluence, **args_kw)
     if args.watch:
         while True:

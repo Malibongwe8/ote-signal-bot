@@ -37,15 +37,26 @@ Message the bot (in the configured chat) any of these — it replies within ~5 m
 
 ## Staying alive / self-healing
 
-- **`scan.yml`** runs the scan every 5 minutes on GitHub's servers.
-- **`watchdog.yml`** is the self-healing supervisor. Every 15 minutes it checks
-  whether `scan.yml` has actually run. If it has **stalled** (no run for 25 min)
-  or GitHub **disabled** it (e.g. 60-day inactivity), the watchdog **re-enables
-  and re-triggers** the scan and pings you on Telegram. The scanner process also
-  catches its own errors and keeps looping rather than dying.
-- **Honest limit:** GitHub cron is best-effort. Runs can be delayed, and the
-  watchdog runs on the same scheduler, so this is a strong safety net — **not an
-  absolute uptime guarantee.** For true 24/7 you'd still want a VPS.
+GitHub's cron turned out **not to fire** for this repo, so the bot does not rely
+on it:
+
+- **`scan.yml` runs as a self-chaining long job.** One run scans every 5 minutes
+  for ~5.5 hours, then **re-dispatches its own successor** (which waits in the
+  concurrency group and starts automatically when the run ends). So a *single*
+  trigger gives continuous coverage — no dependence on frequent cron.
+- **`watchdog.yml`** is a backstop: every 15 minutes it checks freshness and, if
+  the chain has stalled or the workflow was disabled, re-enables and re-triggers
+  it and pings you on Telegram. (It runs on cron too, so treat it as a safety
+  net, not a guarantee.)
+- The scanner process **catches its own errors and keeps looping**; per-symbol
+  fetch failures don't kill the run.
+
+If the chain ever stops for good, just open **Actions → OTE Signal Scan → Run
+workflow** once — that restarts it.
+
+- **Honest limit:** GitHub still caps a job at 6 hours, and the successor only
+  starts if GitHub's scheduler is healthy. This is a strong, largely hands-off
+  setup, but **not an absolute uptime guarantee.** For true 24/7 you'd want a VPS.
 
 ## Setup (one time)
 

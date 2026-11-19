@@ -1,22 +1,27 @@
 name: OTE Signal Scan
 
-# Runs on GitHub's servers every 5 minutes, so it keeps working even when your
-# own machine / sandbox is off. GitHub cron is best-effort and can be delayed
-# a few minutes under load.
+# Self-chaining long run. GitHub's cron does not fire reliably for this repo, so
+# instead of depending on it, each run scans every 5 minutes for ~5.5 hours and
+# then queues its own successor. The successor waits in the concurrency group
+# and starts automatically when this run ends -> continuous coverage from a
+# single trigger. The watchdog + a 6-hourly cron are backstops.
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+    - cron: "0 */6 * * *"     # backstop only (fires rarely/never here)
+  workflow_dispatch: {}       # manual + watchdog trigger
 
-# Avoid overlapping runs piling up (a 50-symbol scan can take a few minutes).
+permissions:
+  actions: write              # needed to re-dispatch the next run (self-chaining)
+  contents: read
+
 concurrency:
   group: ote-scan
-  cancel-in-progress: true
+  cancel-in-progress: false   # let the successor wait, then start when this ends
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 350      # just under GitHub's 6-hour job cap
     steps:
       - uses: actions/checkout@v4
 
@@ -36,16 +41,18 @@ jobs:
       - name: Install dependencies
         run: pip install -q -r requirements.txt
 
-      - name: Run signal scan
+      - name: Run signal scan (self-chaining loop)
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+          GH_DISPATCH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python signal_scanner.py \
             --symbols "EURUSD=X,GBPUSD=X,USDJPY=X,USDCHF=X,AUDUSD=X,NZDUSD=X,USDCAD=X,EURGBP=X,EURJPY=X,GBPJPY=X,EURAUD=X,EURCAD=X,EURCHF=X,GBPAUD=X,GBPCAD=X,GBPCHF=X,AUDJPY=X,CADJPY=X,CHFJPY=X,NZDJPY=X,AUDCAD=X,AUDCHF=X,AUDNZD=X,NZDCAD=X,NZDCHF=X,CADCHF=X,BTC-USD,GC=F,^VIX,^VXN,^VXD,^VVIX,^VIX3M,^VXAPL,^OVX,^VXEEM,^MOVE,^GSPC,^NDX,^DJI,^RUT,^GDAXI,^FTSE,^N225,^HSI,^AXJO,^FCHI,^STOXX50E,^IBEX,^KS11" \
             --timeframes 5m,15m,1h \
             --telegram-token "$TG_TOKEN" \
-            --telegram-chat "$TG_CHAT"
+            --telegram-chat "$TG_CHAT" \
+            --loop --interval 300 --max-runtime 19800
 
       - name: Save scanner state
         if: always()
