@@ -11,9 +11,11 @@ whether or not your own computer is on.
 - **Symbols (28):** 26 FX pairs (majors + crosses), `BTC-USD`, `GC=F` (gold)
 - **Timeframes:** 5m, 15m, 1h
 - **Directions:** both long and short
-- **Strategy:** fib OTE zone (0.62–0.79) + HTF bias + confluence (FVG / Order
-  Block / Liquidity Sweep), entries inside London & NY killzones. Stop loss is
-  placed beyond the swing that defined the OTE leg; target is 2R.
+- **Strategy:** fib OTE zone (0.62–0.79) + HTF bias + multi-timeframe structure
+  agreement + confluence (FVG / Order Block / Liquidity Sweep), entries inside
+  London & NY killzones. **Dynamic stop** sits beyond the swing that defined the
+  OTE leg plus a volatility (ATR) buffer. **TP1 = 1R** (scale out 50%, move SL to
+  breakeven), **TP2 = the opposing structural extreme, at least 2R**.
 
 ## Setup (one time)
 

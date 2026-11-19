@@ -57,9 +57,12 @@ class Trade:
     entry_price: float
     direction: str      # "long" or "short"
     stop: float
-    target: float
+    target: float       # final target (TP2)
     risk_reward: float
+    tp1: float = 0.0    # first scale-out target (1R)
+    tp1_hit: bool = False
     pnl_pct: float = 0.0
+    r_multiple: float = 0.0
     exit_index: Optional[int] = None
     exit_price: Optional[float] = None
     outcome: str = "open"
@@ -244,6 +247,59 @@ def htf_bias_series(df_htf: pd.DataFrame, lookback: int = 3,
     return s
 
 
+def ltf_structure_agrees(swing_highs, swing_lows, i: int, direction: str,
+                         max_age: int = None) -> bool:
+    """
+    Multi-timeframe agreement: require the lower timeframe's OWN structure to be
+    trending the same way as the higher-timeframe bias — higher highs AND higher
+    lows for a long, lower highs AND lower lows for a short. Filters out setups
+    that fight the immediate chart even when the HTF bias says otherwise.
+    """
+    rh = [s for s in swing_highs if s.index < i and (max_age is None or i - s.index <= max_age)]
+    rl = [s for s in swing_lows if s.index < i and (max_age is None or i - s.index <= max_age)]
+    if len(rh) < 2 or len(rl) < 2:
+        return False
+    if direction == "long":
+        return rh[-1].price > rh[-2].price and rl[-1].price > rl[-2].price
+    return rh[-1].price < rh[-2].price and rl[-1].price < rl[-2].price
+
+
+def build_levels(direction: str, entry: float, atr: float, swing_low: float,
+                 swing_high: float, rr_ratio: float = 2.0, buffer_atr: float = 0.35,
+                 max_risk_atr: float = 3.5):
+    """
+    Dynamic stop with two targets (shared by the scanner and the backtest).
+
+      SL  : just beyond the OTE-leg swing (the invalidation level) plus a
+            volatility-scaled buffer (buffer_atr * ATR) -> widens when the market
+            is wild, tightens when it is calm. Capped at max_risk_atr * ATR.
+      TP1 : 1R — scale out half the position, bank a win, de-risk the rest.
+      TP2 : the opposing structural extreme of the leg, and never less than
+            rr_ratio * R ("a little more" than the old fixed target).
+
+    Returns (stop, tp1, tp2, risk) or None if the geometry is invalid.
+    """
+    if atr <= 0:
+        return None
+    if direction == "long":
+        stop = swing_low - buffer_atr * atr
+        risk = min(entry - stop, max_risk_atr * atr)
+        if risk <= 0:
+            return None
+        stop = entry - risk
+        tp1 = entry + risk
+        tp2 = max(swing_high, entry + rr_ratio * risk)
+    else:
+        stop = swing_high + buffer_atr * atr
+        risk = min(stop - entry, max_risk_atr * atr)
+        if risk <= 0:
+            return None
+        stop = entry + risk
+        tp1 = entry - risk
+        tp2 = min(swing_low, entry - rr_ratio * risk)
+    return stop, tp1, tp2, risk
+
+
 def in_killzone(dt) -> bool:
     """
     Killzones in New York time:
@@ -342,29 +398,33 @@ def run_strategy(df_ltf: pd.DataFrame, df_htf: pd.DataFrame,
     in_trade: Optional[Trade] = None
 
     for i in range(60, len(df_ltf)):
-        # Manage open trade
+        # Manage open trade (TP1 = scale out half, TP2 = final target)
         if in_trade is not None:
-            if in_trade.direction == "long":
-                if l[i] <= in_trade.stop:
-                    in_trade.outcome = "loss"
-                    in_trade.exit_price = in_trade.stop
-                elif h[i] >= in_trade.target:
-                    in_trade.outcome = "win"
-                    in_trade.exit_price = in_trade.target
-            else:
-                if h[i] >= in_trade.stop:
-                    in_trade.outcome = "loss"
-                    in_trade.exit_price = in_trade.stop
-                elif l[i] <= in_trade.target:
-                    in_trade.outcome = "win"
-                    in_trade.exit_price = in_trade.target
-            if in_trade.outcome != "open":
-                in_trade.exit_index = i
-                in_trade.pnl_pct = ((in_trade.exit_price - in_trade.entry_price) /
-                                    in_trade.entry_price) * 100
-                if in_trade.direction == "short":
-                    in_trade.pnl_pct *= -1
-                trades.append(in_trade)
+            t = in_trade
+            long = t.direction == "long"
+            hit_stop = (l[i] <= t.stop) if long else (h[i] >= t.stop)
+            hit_tp2 = (h[i] >= t.target) if long else (l[i] <= t.target)
+            hit_tp1 = (h[i] >= t.tp1) if long else (l[i] <= t.tp1)
+            if hit_stop:                      # conservative: stop wins ties
+                t.exit_price = t.stop
+                t.outcome = "be" if t.tp1_hit else "loss"
+            elif hit_tp2:
+                t.exit_price = t.target
+                t.outcome = "win"
+            elif hit_tp1 and not t.tp1_hit:
+                t.tp1_hit = True              # bank half at 1R, let the rest run
+            if t.outcome != "open":
+                t.exit_index = i
+                R = (t.entry_price - t.stop) if long else (t.stop - t.entry_price)
+                tp2_r = abs(t.target - t.entry_price) / R if R > 0 else 0.0
+                if t.outcome == "win":
+                    t.r_multiple = 0.5 * 1.0 + 0.5 * tp2_r   # half @1R + half @TP2
+                elif t.outcome == "be":
+                    t.r_multiple = 0.0                       # +0.5 TP1, -0.5 SL
+                else:
+                    t.r_multiple = -1.0
+                t.pnl_pct = t.r_multiple * (R / t.entry_price) * 100
+                trades.append(t)
                 in_trade = None
             continue
 
@@ -380,6 +440,11 @@ def run_strategy(df_ltf: pd.DataFrame, df_htf: pd.DataFrame,
         elif b == "bearish":
             direction = "short"
         else:
+            continue
+
+        # Multi-timeframe agreement: the LTF's own structure must trend the same
+        # way as the bias, so we stop buying into a falling chart (clash signals).
+        if not ltf_structure_agrees(swing_highs, swing_lows, i, direction):
             continue
 
         # Find the most recent completed swing to draw the fib
@@ -437,48 +502,37 @@ def run_strategy(df_ltf: pd.DataFrame, df_htf: pd.DataFrame,
         if len(confluence) < min_confluence:
             continue
 
-        # Entry + structurally-correct stop + target
-        #   SL sits just beyond the swing that defined the OTE leg (invalidation
-        #   level), capped at 3*ATR so a wide swing can't create an oversized risk.
+        # Entry + dynamic stop + TP1/TP2 (shared builder)
         entry = cur_price
-        a = atr[i]
-        if a <= 0:
+        lv = build_levels(direction, entry, atr[i], sw_low.price, sw_high.price, rr_ratio)
+        if lv is None:
             continue
-        if direction == "long":
-            raw_stop = sw_low.price - 0.1 * a        # below the leg origin
-            risk = min(entry - raw_stop, 3 * a)
-            if risk <= 0:
-                continue
-            stop = entry - risk
-            target = entry + risk * rr_ratio
-        else:
-            raw_stop = sw_high.price + 0.1 * a        # above the leg origin
-            risk = min(raw_stop - entry, 3 * a)
-            if risk <= 0:
-                continue
-            stop = entry + risk
-            target = entry - risk * rr_ratio
+        stop, tp1, tp2, risk = lv
 
         in_trade = Trade(
             entry_index=i,
             entry_price=entry,
             direction=direction,
             stop=stop,
-            target=target,
+            target=tp2,
+            tp1=tp1,
             risk_reward=rr_ratio,
             confluence=confluence,
         )
 
-    # Close any still-open trade at last price
+    # Close any still-open trade at last price (mark-to-market in R)
     if in_trade is not None:
+        t = in_trade
         last = len(df_ltf) - 1
-        in_trade.exit_index = last
-        in_trade.exit_price = c[last]
-        in_trade.outcome = "open"
-        in_trade.pnl_pct = ((c[last] - in_trade.entry_price) /
-                            in_trade.entry_price) * 100
-        if in_trade.direction == "short":
-            in_trade.pnl_pct *= -1
-        trades.append(in_trade)
+        R = (t.entry_price - t.stop) if t.direction == "long" else (t.stop - t.entry_price)
+        if R > 0:
+            mtm = ((c[last] - t.entry_price) if t.direction == "long"
+                   else (t.entry_price - c[last])) / R
+            t.r_multiple = (0.5 if t.tp1_hit else 0.0) + 0.5 * mtm
+            t.pnl_pct = t.r_multiple * (R / t.entry_price) * 100
+        t.exit_index = last
+        t.exit_price = c[last]
+        t.outcome = "open"
+        trades.append(t)
 
     return trades

@@ -30,7 +30,8 @@ except ImportError:
 
 from ote_strategy import (run_strategy, _atr, _fractal_swings, find_fvgs,
                           find_order_blocks, find_liquidity_sweeps,
-                          htf_bias, in_killzone, ote_zones, price_in_ote, Trade)
+                          htf_bias, in_killzone, ote_zones, price_in_ote, Trade,
+                          ltf_structure_agrees, build_levels)
 
 STATE_FILE = "scanner_state.json"
 LOG_FILE = "signals_log.jsonl"
@@ -128,6 +129,10 @@ def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
     direction = {"bullish": "long", "bearish": "short"}.get(bias)
     if not direction:
         return None
+    # Multi-timeframe agreement: LTF structure must trend the same way as bias,
+    # so we don't send "clash" signals that fight the immediate chart.
+    if not ltf_structure_agrees(swing_highs, swing_lows, i, direction):
+        return None
 
     if direction == "long":
         rl = [s for s in swing_lows if s.index < i]
@@ -172,28 +177,16 @@ def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
         return None
 
     entry = float(c[i])
-    a = atr[i]
-    if a <= 0:
+    lv = build_levels(direction, entry, atr[i], sw_low.price, sw_high.price, rr)
+    if lv is None:
         return None
-    # Structurally-correct SL: just beyond the swing that defined the OTE leg
-    # (the invalidation level), capped at 3*ATR.
-    if direction == "long":
-        raw_stop = sw_low.price - 0.1 * a
-        risk = min(entry - raw_stop, 3 * a)
-        if risk <= 0:
-            return None
-        stop, target = entry - risk, entry + risk * rr
-    else:
-        raw_stop = sw_high.price + 0.1 * a
-        risk = min(raw_stop - entry, 3 * a)
-        if risk <= 0:
-            return None
-        stop, target = entry + risk, entry - risk * rr
+    stop, tp1, tp2, risk = lv
     return {
         "type": "ENTRY", "symbol": symbol, "timeframe": tf,
         "direction": direction, "bar_time": str(ts),
         "entry": round(entry, 5), "stop": round(stop, 5),
-        "target": round(target, 5), "rr": rr, "htf_bias": bias,
+        "tp1": round(tp1, 5), "target": round(tp2, 5), "rr": rr,
+        "htf_bias": bias,
         "confluence": confluence,
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -202,18 +195,28 @@ def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
 def check_open_position(pos: dict, df_ltf) -> dict | None:
     last = df_ltf.iloc[-1]
     hi, lo = float(last["high"]), float(last["low"])
-    d = pos["direction"]
-    if d == "long":
-        if lo <= pos["stop"]:
-            return _exit_signal(pos, "loss", pos["stop"])
-        if hi >= pos["target"]:
-            return _exit_signal(pos, "win", pos["target"])
-    else:
-        if hi >= pos["stop"]:
-            return _exit_signal(pos, "loss", pos["stop"])
-        if lo <= pos["target"]:
-            return _exit_signal(pos, "win", pos["target"])
+    long = pos["direction"] == "long"
+    stop, tp2 = pos["stop"], pos["target"]
+    tp1 = pos.get("tp1")
+    hit_stop = (lo <= stop) if long else (hi >= stop)
+    hit_tp2 = (hi >= tp2) if long else (lo <= tp2)
+    hit_tp1 = tp1 is not None and ((hi >= tp1) if long else (lo <= tp1))
+    if hit_stop:
+        return _exit_signal(pos, "be" if pos.get("tp1_hit") else "loss", stop)
+    if hit_tp2:
+        return _exit_signal(pos, "win", tp2)
+    if hit_tp1 and not pos.get("tp1_hit"):
+        return _partial_signal(pos, tp1)
     return None
+
+
+def _partial_signal(pos, price):
+    return {
+        "type": "TP1", "symbol": pos["symbol"], "timeframe": pos.get("timeframe"),
+        "direction": pos["direction"], "entry": pos["entry"], "exit": round(price, 5),
+        "stop": pos.get("stop"), "target": pos.get("target"), "tp1": pos.get("tp1"),
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _exit_signal(pos, outcome, price):
@@ -221,7 +224,8 @@ def _exit_signal(pos, outcome, price):
         "type": "EXIT", "symbol": pos["symbol"], "timeframe": pos.get("timeframe"),
         "direction": pos["direction"], "outcome": outcome,
         "entry": pos["entry"], "exit": round(price, 5),
-        "stop": pos.get("stop"), "target": pos.get("target"), "rr": pos.get("rr"),
+        "stop": pos.get("stop"), "target": pos.get("target"), "tp1": pos.get("tp1"),
+        "rr": pos.get("rr"),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -233,8 +237,14 @@ def _format(signal: dict) -> str:
     if signal["type"] == "ENTRY":
         return (f"OTE ENTRY [{signal.get('timeframe')}] {signal['symbol']} "
                 f"{signal['direction'].upper()}\n"
-                f"Entry {signal['entry']} | SL {signal['stop']} | TP {signal['target']}\n"
+                f"Entry {signal['entry']} | SL {signal['stop']}\n"
+                f"TP1 {signal.get('tp1')} (1R - take 50%) | TP2 {signal['target']}\n"
                 f"Confluence: {'+'.join(signal['confluence'])} | bias {signal['htf_bias']}")
+    if signal["type"] == "TP1":
+        return (f"OTE TP1 HIT [{signal.get('timeframe')}] {signal['symbol']} "
+                f"{signal['direction'].upper()}\n"
+                f"Entry {signal['entry']} | TP1 {signal['exit']} (banked 50%, SL -> breakeven) "
+                f"| running to TP2 {signal.get('target')}")
     return (f"OTE EXIT [{signal.get('timeframe')}] {signal['symbol']} "
             f"{signal['direction'].upper()} -> {signal['outcome'].upper()}\n"
             f"Entry {signal['entry']} | Exit {signal['exit']}")
@@ -320,7 +330,12 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
                 exit_sig = check_open_position(pos, df_ltf)
                 if exit_sig:
                     emit(exit_sig, webhook, tg_token, tg_chat, df_ltf=df_ltf)
-                    open_positions.pop(key, None)
+                    if exit_sig["type"] == "EXIT":
+                        open_positions.pop(key, None)
+                    else:                       # TP1 partial -> keep running to TP2
+                        pos["tp1_hit"] = True
+                        pos["stop"] = pos["entry"]   # SL to breakeven
+                        open_positions[key] = pos
                     continue
 
             sig = find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence)
@@ -343,7 +358,8 @@ def run_test(tg_token, tg_chat, webhook):
     samples = [
         {"type": "ENTRY", "symbol": "BTC-USD", "timeframe": "15m",
          "direction": "short", "bar_time": now, "entry": 81250.5,
-         "stop": 81940.0, "target": 79871.5, "rr": 2.0, "htf_bias": "bearish",
+         "stop": 81940.0, "tp1": 80561.0, "target": 79871.5, "rr": 2.0,
+         "htf_bias": "bearish",
          "confluence": ["FVG", "Sweep(BSL)"], "detected_at": now},
         {"type": "EXIT", "symbol": "BTC-USD", "timeframe": "15m",
          "direction": "short", "outcome": "win", "entry": 81250.5,

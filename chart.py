@@ -40,31 +40,37 @@ def render_chart(df: pd.DataFrame, signal: dict, out_path: str, bars: int = 90):
                                facecolor=color, edgecolor=color, zorder=3))
 
     entry, stop, target = signal["entry"], signal["stop"], signal["target"]
+    tp1 = signal.get("tp1")
     is_long = signal["direction"] == "long"
 
     # --- Shaded risk / reward regions ---
     ax.axhspan(min(entry, target), max(entry, target), color=TP_C, alpha=0.08, zorder=1)
     ax.axhspan(min(entry, stop), max(entry, stop), color=SL_C, alpha=0.08, zorder=1)
 
-    # --- Level lines ---
+    # --- Level lines (Entry, TP1, TP2, SL) ---
     ax.axhline(entry, color=ENTRY_C, lw=1.4, ls="--", zorder=4)
-    ax.axhline(target, color=TP_C, lw=1.4, ls="-", zorder=4)
+    ax.axhline(target, color=TP_C, lw=1.4, ls="-", zorder=4)              # TP2
+    if tp1 is not None:
+        ax.axhline(tp1, color=TP_C, lw=1.0, ls="-.", alpha=0.8, zorder=4)  # TP1
     ax.axhline(stop, color=SL_C, lw=1.4, ls="-", zorder=4)
 
     # --- Right-side labels ---
     x_lab = n - 0.5
     ax.text(x_lab, entry, f"  Entry {entry:.5g}", color=ENTRY_C,
             va="center", ha="left", fontsize=9, fontweight="bold")
-    if signal.get("type") == "EXIT":
+    if signal.get("type") in ("EXIT", "TP1"):
         ex = signal.get("exit", entry)
-        state = signal.get("outcome", "").upper()
-        ex_color = UP if state == "WIN" else DOWN
+        state = (signal.get("outcome") or ("TP1" if signal.get("type") == "TP1" else "")).upper()
+        ex_color = UP if state in ("WIN", "TP1") else DOWN
         ax.axhline(ex, color=ex_color, lw=1.6, ls=":", zorder=5)
         ax.text(x_lab, ex, f"  Exit {ex:.5g} ({state})", color=ex_color,
                 va="center", ha="left", fontsize=9, fontweight="bold")
     else:
-        ax.text(x_lab, target, f"  TP {target:.5g}  ({signal.get('rr', 2)}R)",
+        ax.text(x_lab, target, f"  TP2 {target:.5g}  ({signal.get('rr', 2)}R)",
                 color=TP_C, va="center", ha="left", fontsize=9, fontweight="bold")
+        if tp1 is not None:
+            ax.text(x_lab, tp1, f"  TP1 {tp1:.5g}", color=TP_C, alpha=0.85,
+                    va="center", ha="left", fontsize=8)
         ax.text(x_lab, stop, f"  SL {stop:.5g}", color=SL_C,
                 va="center", ha="left", fontsize=9, fontweight="bold")
 
@@ -91,7 +97,8 @@ def render_chart(df: pd.DataFrame, signal: dict, out_path: str, bars: int = 90):
     ax.set_title(title, color=TEXT, fontsize=12, fontweight="bold", loc="left", pad=10)
 
     conf = "+".join(signal.get("confluence", []))
-    sub = f"Entry {entry:.5g}   SL {stop:.5g}   TP {target:.5g}" + \
+    tp1s = f"   TP1 {tp1:.5g}" if tp1 is not None else ""
+    sub = f"Entry {entry:.5g}   SL {stop:.5g}{tp1s}   TP2 {target:.5g}" + \
           (f"   |   {conf}" if conf else "")
     ax.text(0, 1.015, sub, transform=ax.transAxes, color="#787b86",
             fontsize=9, ha="left")
