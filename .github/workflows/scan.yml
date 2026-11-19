@@ -8,15 +8,15 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
 
-# Avoid overlapping runs piling up.
+# Avoid overlapping runs piling up (a 50-symbol scan can take a few minutes).
 concurrency:
   group: ote-scan
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +42,7 @@ jobs:
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT }}
         run: |
           python signal_scanner.py \
-            --symbols "EURUSD=X,GBPUSD=X,USDJPY=X,USDCHF=X,AUDUSD=X,NZDUSD=X,USDCAD=X,EURGBP=X,EURJPY=X,GBPJPY=X,EURAUD=X,EURCAD=X,EURCHF=X,GBPAUD=X,GBPCAD=X,GBPCHF=X,AUDJPY=X,CADJPY=X,CHFJPY=X,NZDJPY=X,AUDCAD=X,AUDCHF=X,AUDNZD=X,NZDCAD=X,NZDCHF=X,CADCHF=X,BTC-USD,GC=F" \
+            --symbols "EURUSD=X,GBPUSD=X,USDJPY=X,USDCHF=X,AUDUSD=X,NZDUSD=X,USDCAD=X,EURGBP=X,EURJPY=X,GBPJPY=X,EURAUD=X,EURCAD=X,EURCHF=X,GBPAUD=X,GBPCAD=X,GBPCHF=X,AUDJPY=X,CADJPY=X,CHFJPY=X,NZDJPY=X,AUDCAD=X,AUDCHF=X,AUDNZD=X,NZDCAD=X,NZDCHF=X,CADCHF=X,BTC-USD,GC=F,^VIX,^VXN,^VXD,^VVIX,^VIX3M,^VXAPL,^OVX,^VXEEM,^MOVE,^GSPC,^NDX,^DJI,^RUT,^GDAXI,^FTSE,^N225,^HSI,^AXJO,^FCHI,^STOXX50E,^IBEX,^KS11" \
             --timeframes 5m,15m,1h \
             --telegram-token "$TG_TOKEN" \
             --telegram-chat "$TG_CHAT"

@@ -63,7 +63,11 @@ def acquire_lock() -> bool:
 # (^RVX and ^SKEW return no data on Yahoo and are excluded.)
 DEFAULT_SYMBOLS = [
     "EURUSD=X", "GBPUSD=X", "BTC-USD",
-    "^VIX", "^VXN", "^VXD", "^VVIX", "^VIX3M",
+    # Volatility indices
+    "^VIX", "^VXN", "^VXD", "^VVIX", "^VIX3M", "^VXAPL", "^OVX", "^VXEEM", "^MOVE",
+    # Equity / regional indices
+    "^GSPC", "^NDX", "^DJI", "^RUT", "^GDAXI", "^FTSE", "^N225",
+    "^HSI", "^AXJO", "^FCHI", "^STOXX50E", "^IBEX", "^KS11",
 ]
 
 # timeframe -> (higher-timeframe for bias, yfinance max period allowed)
@@ -181,12 +185,20 @@ def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
     if lv is None:
         return None
     stop, tp1, tp2, risk = lv
+    m = len(df_ltf)
     return {
         "type": "ENTRY", "symbol": symbol, "timeframe": tf,
         "direction": direction, "bar_time": str(ts),
         "entry": round(entry, 5), "stop": round(stop, 5),
         "tp1": round(tp1, 5), "target": round(tp2, 5), "rr": rr,
         "htf_bias": bias,
+        # Swing high/low the OTE is drawn on, plus the OTE zone, for the chart.
+        "swing_high": round(sw_high.price, 5),
+        "swing_low": round(sw_low.price, 5),
+        "swing_high_offset": int((m - 1) - sw_high.index),
+        "swing_low_offset": int((m - 1) - sw_low.index),
+        "ote_top": round(max(zones[0], zones[2]), 5),
+        "ote_bottom": round(min(zones[0], zones[2]), 5),
         "confluence": confluence,
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -215,6 +227,10 @@ def _partial_signal(pos, price):
         "type": "TP1", "symbol": pos["symbol"], "timeframe": pos.get("timeframe"),
         "direction": pos["direction"], "entry": pos["entry"], "exit": round(price, 5),
         "stop": pos.get("stop"), "target": pos.get("target"), "tp1": pos.get("tp1"),
+        "swing_high": pos.get("swing_high"), "swing_low": pos.get("swing_low"),
+        "swing_high_offset": pos.get("swing_high_offset"),
+        "swing_low_offset": pos.get("swing_low_offset"),
+        "ote_top": pos.get("ote_top"), "ote_bottom": pos.get("ote_bottom"),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -226,6 +242,10 @@ def _exit_signal(pos, outcome, price):
         "entry": pos["entry"], "exit": round(price, 5),
         "stop": pos.get("stop"), "target": pos.get("target"), "tp1": pos.get("tp1"),
         "rr": pos.get("rr"),
+        "swing_high": pos.get("swing_high"), "swing_low": pos.get("swing_low"),
+        "swing_high_offset": pos.get("swing_high_offset"),
+        "swing_low_offset": pos.get("swing_low_offset"),
+        "ote_top": pos.get("ote_top"), "ote_bottom": pos.get("ote_bottom"),
         "detected_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -351,29 +371,72 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
     save_state(state)
 
 
+def _sample_from_data(df, symbol, tf):
+    """Build a realistic ENTRY sample from live data so the preview chart shows
+    the actual swing high/low the OTE is drawn on."""
+    atr = _atr(df, 14)
+    sh, sl = _fractal_swings(df, lookback=3)
+    i = len(df) - 1
+    if len(sh) < 2 or len(sl) < 2:
+        return None
+    sw_high, sw_low = sh[-1], sl[-1]
+    if sw_high.price <= sw_low.price:
+        return None
+    direction = "short" if sw_high.index > sw_low.index else "long"
+    entry = float(df["close"].iloc[i])
+    lv = build_levels(direction, entry, float(atr[i]), sw_low.price, sw_high.price, 2.0)
+    if lv is None:
+        return None
+    stop, tp1, tp2, _ = lv
+    zones = ote_zones(sw_low.price, sw_high.price, direction)
+    m = len(df)
+    return {
+        "type": "ENTRY", "symbol": symbol, "timeframe": tf,
+        "direction": direction, "bar_time": str(df.index[i]),
+        "entry": round(entry, 5), "stop": round(stop, 5),
+        "tp1": round(tp1, 5), "target": round(tp2, 5), "rr": 2.0,
+        "htf_bias": "bearish" if direction == "short" else "bullish",
+        "swing_high": round(sw_high.price, 5), "swing_low": round(sw_low.price, 5),
+        "swing_high_offset": int((m - 1) - sw_high.index),
+        "swing_low_offset": int((m - 1) - sw_low.index),
+        "ote_top": round(max(zones[0], zones[2]), 5),
+        "ote_bottom": round(min(zones[0], zones[2]), 5),
+        "confluence": ["FVG", "OB"],
+        "detected_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def run_test(tg_token, tg_chat, webhook):
-    """Emit sample signals through the real delivery path so the user can see
-    exactly how a signal will look. Nothing is sent unless Telegram creds exist."""
-    now = datetime.now(timezone.utc).isoformat()
-    samples = [
-        {"type": "ENTRY", "symbol": "BTC-USD", "timeframe": "15m",
-         "direction": "short", "bar_time": now, "entry": 81250.5,
-         "stop": 81940.0, "tp1": 80561.0, "target": 79871.5, "rr": 2.0,
-         "htf_bias": "bearish",
-         "confluence": ["FVG", "Sweep(BSL)"], "detected_at": now},
-        {"type": "EXIT", "symbol": "BTC-USD", "timeframe": "15m",
-         "direction": "short", "outcome": "win", "entry": 81250.5,
-         "exit": 79871.5, "detected_at": now},
-    ]
+    """Send a realistic sample alert (with the swing high/low + OTE chart) through
+    the real delivery path so the user sees exactly how a signal will look."""
     print("=== SIGNAL PREVIEW (exactly how each alert is formatted) ===\n")
-    for s in samples:
-        print("-" * 44)
-        print(_format(s))
-        print("-" * 44 + "\n")
+    df_ltf, sig = None, None
+    for symbol, tf in [("GBPUSD=X", "15m"), ("BTC-USD", "15m"), ("EURUSD=X", "1h")]:
+        try:
+            htf, period = TF_CONFIG[tf]
+            d, _ = fetch_recent(symbol, tf, htf, period)
+            s = _sample_from_data(d, symbol, tf) if len(d) > 80 else None
+            if s:
+                df_ltf, sig = d, s
+                break
+        except Exception as e:
+            print("  (test fetch failed:", e, ")")
+    if sig is None:
+        now = datetime.now(timezone.utc).isoformat()
+        sig = {"type": "ENTRY", "symbol": "BTC-USD", "timeframe": "15m",
+               "direction": "short", "bar_time": now, "entry": 81250.5,
+               "stop": 81940.0, "tp1": 80561.0, "target": 79871.5, "rr": 2.0,
+               "htf_bias": "bearish", "confluence": ["FVG", "Sweep(BSL)"],
+               "detected_at": now}
+    print("-" * 44)
+    print(_format(sig))
+    print("-" * 44 + "\n")
     if tg_token and tg_chat:
-        for s in samples:
-            send_telegram(s, tg_token, tg_chat)
-        print("Sent 2 test messages to Telegram.")
+        if df_ltf is not None:
+            send_telegram_photo(sig, df_ltf, tg_token, tg_chat)
+        else:
+            send_telegram(sig, tg_token, tg_chat)
+        print("Sent test signal to Telegram (chart includes swing high/low + OTE zone).")
     else:
         print("No Telegram token configured -> PREVIEW ONLY, nothing was sent.")
 

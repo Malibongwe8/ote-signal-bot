@@ -8,7 +8,9 @@ whether or not your own computer is on.
 
 ## What it scans
 
-- **Symbols (28):** 26 FX pairs (majors + crosses), `BTC-USD`, `GC=F` (gold)
+- **Symbols (50):** 26 FX pairs (majors + crosses), `BTC-USD`, `GC=F` (gold),
+  9 volatility indices (`^VIX ^VXN ^VXD ^VVIX ^VIX3M ^VXAPL ^OVX ^VXEEM ^MOVE`),
+  13 equity/regional indices (`^GSPC ^NDX ^DJI ^RUT ^GDAXI ^FTSE ^N225 ^HSI ^AXJO ^FCHI ^STOXX50E ^IBEX ^KS11`)
 - **Timeframes:** 5m, 15m, 1h
 - **Directions:** both long and short
 - **Strategy:** fib OTE zone (0.62–0.79) + HTF bias + multi-timeframe structure

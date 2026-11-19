@@ -74,6 +74,34 @@ def render_chart(df: pd.DataFrame, signal: dict, out_path: str, bars: int = 90):
         ax.text(x_lab, stop, f"  SL {stop:.5g}", color=SL_C,
                 va="center", ha="left", fontsize=9, fontweight="bold")
 
+    # --- Swing high/low the OTE is acting on + the OTE zone ---
+    SW = "#f5a623"          # swing marker colour
+    sh_p = signal.get("swing_high")
+    sl_p = signal.get("swing_low")
+    zt = signal.get("ote_top")
+    zb = signal.get("ote_bottom")
+    if zt is not None and zb is not None:
+        ax.axhspan(min(zt, zb), max(zt, zb), color="#2962ff", alpha=0.12, zorder=1)
+        ax.text(1, (zt + zb) / 2, " OTE 0.62-0.79", color="#9aa0aa",
+                fontsize=8, va="center", ha="left", zorder=6)
+    if sh_p is not None:
+        ax.axhline(sh_p, color=SW, lw=1.0, ls=":", alpha=0.9, zorder=3)
+        ax.text(x_lab, sh_p, f"  Swing High {sh_p:.5g}", color=SW,
+                va="center", ha="left", fontsize=8)
+    if sl_p is not None:
+        ax.axhline(sl_p, color=SW, lw=1.0, ls=":", alpha=0.9, zorder=3)
+        ax.text(x_lab, sl_p, f"  Swing Low {sl_p:.5g}", color=SW,
+                va="center", ha="left", fontsize=8)
+    # Markers placed exactly on the swing bars (when in view)
+    off_hi = signal.get("swing_high_offset")
+    off_lo = signal.get("swing_low_offset")
+    if sh_p is not None and isinstance(off_hi, int) and 0 <= off_hi <= n - 1:
+        ax.scatter([(n - 1) - off_hi], [sh_p], marker="o", s=55,
+                   facecolors="none", edgecolors=SW, linewidths=1.4, zorder=7)
+    if sl_p is not None and isinstance(off_lo, int) and 0 <= off_lo <= n - 1:
+        ax.scatter([(n - 1) - off_lo], [sl_p], marker="o", s=55,
+                   facecolors="none", edgecolors=SW, linewidths=1.4, zorder=7)
+
     # --- Entry marker ---
     ax.axvline(n - 1, color=ENTRY_C, lw=0.8, ls=":", alpha=0.6, zorder=1)
     marker = "^" if is_long else "v"
