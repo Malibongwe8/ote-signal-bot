@@ -31,7 +31,7 @@ except ImportError:
 from ote_strategy import (run_strategy, _atr, _fractal_swings, find_fvgs,
                           find_order_blocks, find_liquidity_sweeps,
                           htf_bias, in_killzone, ote_zones, price_in_ote, Trade,
-                          ltf_structure_agrees, build_levels)
+                          ltf_structure_agrees, build_levels, strong_confirmation)
 
 STATE_FILE = "scanner_state.json"
 LOG_FILE = "signals_log.jsonl"
@@ -114,7 +114,8 @@ def fetch_recent(symbol: str, ltf: str, htf: str, period: str):
     return df_ltf, df_htf
 
 
-def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
+def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400,
+                    strict=False):
     # Bound the analysis window so intraday (1m-30m) scans stay fast.
     if len(df_ltf) > window:
         df_ltf = df_ltf.iloc[-window:]
@@ -179,6 +180,13 @@ def find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence, window=400):
                 break
     if len(confluence) < min_confluence:
         return None
+
+    # Strong confirmation: a candlestick pattern AND an ICT signal together.
+    cand, ict = strong_confirmation(df_ltf, i, direction, sweeps, atr)
+    if strict and not (cand and ict):
+        return None
+    if cand and ict:
+        confluence = confluence + [f"Candle:{cand}", f"ICT:{ict}"]
 
     entry = float(c[i])
     lv = build_levels(direction, entry, atr[i], sw_low.price, sw_high.price, rr)
@@ -443,7 +451,8 @@ def handle_commands(token, chat, cfg):
     return handled
 
 
-def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_chat):
+def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_chat,
+              strict=False):
     # Answer any pending bot commands first (so /status etc. are responsive).
     handle_commands(tg_token, tg_chat,
                     {"symbols": symbols, "timeframes": timeframes, "rr": rr})
@@ -480,7 +489,8 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
                         open_positions[key] = pos
                     continue
 
-            sig = find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence)
+            sig = find_new_signal(df_ltf, df_htf, symbol, tf, rr, min_confluence,
+                                  strict=strict)
             if sig and key not in open_positions:
                 k = f"{key}|{sig['bar_time']}|{sig['direction']}"
                 if k not in seen:
@@ -598,6 +608,9 @@ def main():
     ap.add_argument("--timeframes", default="1m,5m,15m,30m,1h")
     ap.add_argument("--rr", type=float, default=2.0)
     ap.add_argument("--min-confluence", type=int, default=2)
+    ap.add_argument("--strict", action="store_true",
+                    help="require a candlestick pattern AND an ICT signal "
+                         "(very selective; off by default)")
     ap.add_argument("--interval", type=int, default=60, help="seconds between scans")
     ap.add_argument("--watch", action="store_true", help="loop forever")
     ap.add_argument("--loop", action="store_true",
@@ -639,7 +652,7 @@ def main():
     print(f"Mode: {mode}\n")
 
     args_kw = dict(webhook=args.webhook, tg_token=args.telegram_token,
-                   tg_chat=args.telegram_chat)
+                   tg_chat=args.telegram_chat, strict=args.strict)
 
     if args.loop:
         # Self-chaining run: queue the successor immediately (it waits in the

@@ -130,6 +130,8 @@ def main():
     parser.add_argument("--rr", type=float, default=2.0, help="reward-to-risk")
     parser.add_argument("--min-confluence", type=int, default=2,
                         help="min PD arrays inside OTE")
+    parser.add_argument("--strict", action="store_true",
+                        help="require a candlestick pattern AND an ICT signal")
     args = parser.parse_args()
 
     df_ltf, df_htf = fetch_data(args.symbol, args.ltf, args.htf, args.period)
@@ -142,6 +144,7 @@ def main():
         rr_ratio=args.rr,
         atr_mult_stop=1.5,
         min_confluence=args.min_confluence,
+        strict=args.strict,
     )
     stats = summarize(trades)
     print_report(stats, trades, args.symbol, args.rr)

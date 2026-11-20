@@ -164,6 +164,67 @@ def find_liquidity_sweeps(df: pd.DataFrame, swing_highs: List[Swing],
     return sweeps
 
 
+def candle_confirms(df: pd.DataFrame, i: int, direction: str) -> Optional[str]:
+    """Strong candlestick confirmation at bar i or i-1 (only high-quality
+    patterns): bullish/bearish engulfing, or a hammer/shooting-star pin bar."""
+    if i < 2:
+        return None
+    o = df["open"].values
+    c = df["close"].values
+    h = df["high"].values
+    l = df["low"].values
+    for j in (i, i - 1):
+        oo, cc, hh, ll = o[j], c[j], h[j], l[j]
+        op, cp = o[j - 1], c[j - 1]
+        rng = hh - ll
+        if rng <= 0:
+            continue
+        body = abs(cc - oo)
+        upper = hh - max(oo, cc)
+        lower = min(oo, cc) - ll
+        bull = cc > oo
+        # Engulfing
+        if direction == "long" and bull and cp < op and cc >= op and oo <= cp and body > 0:
+            return "Engulfing"
+        if direction == "short" and (not bull) and cp > op and cc <= op and oo >= cp and body > 0:
+            return "Engulfing"
+        # Pin bar (hammer / shooting star): dominant rejection wick
+        if direction == "long" and lower >= 2 * body and upper <= body:
+            return "Pin"
+        if direction == "short" and upper >= 2 * body and lower <= body:
+            return "Pin"
+    return None
+
+
+def ict_confirms(df: pd.DataFrame, i: int, direction: str,
+                 sweeps: List[LiquiditySweep], atr: np.ndarray) -> Optional[str]:
+    """ICT second confirmation: a displacement candle (strong body in the trade
+    direction) or a liquidity sweep at/just before the entry bar."""
+    o = df["open"].values
+    c = df["close"].values
+    for j in range(max(1, i - 2), i + 1):
+        if atr[j] <= 0:
+            continue
+        body = c[j] - o[j]
+        if direction == "long" and body >= 1.0 * atr[j]:
+            return "Displacement"
+        if direction == "short" and -body >= 1.0 * atr[j]:
+            return "Displacement"
+    for s in sweeps:
+        if abs(s.index - i) <= 2:
+            if (direction == "long" and s.kind == "SSL") or \
+               (direction == "short" and s.kind == "BSL"):
+                return "Sweep"
+    return None
+
+
+def strong_confirmation(df: pd.DataFrame, i: int, direction: str,
+                        sweeps: List[LiquiditySweep], atr: np.ndarray):
+    """Require BOTH a strong candlestick pattern AND an ICT signal.
+    Returns (candle_label, ict_label) or (None, ...) when not confirmed."""
+    return candle_confirms(df, i, direction), ict_confirms(df, i, direction, sweeps, atr)
+
+
 def _atr(df: pd.DataFrame, period: int = 14) -> np.ndarray:
     h = df["high"].values
     l = df["low"].values
@@ -352,7 +413,8 @@ def price_in_ote(price: float, zones: Tuple[float, float, float],
 def run_strategy(df_ltf: pd.DataFrame, df_htf: pd.DataFrame,
                  rr_ratio: float = 2.0,
                  atr_mult_stop: float = 1.5,
-                 min_confluence: int = 2) -> List[Trade]:
+                 min_confluence: int = 2,
+                 strict: bool = False) -> List[Trade]:
     """
     Run the OTE+SMC strategy.
 
@@ -501,6 +563,13 @@ def run_strategy(df_ltf: pd.DataFrame, df_htf: pd.DataFrame,
 
         if len(confluence) < min_confluence:
             continue
+
+        # Strong confirmation: a candlestick pattern AND an ICT signal together.
+        cand, ict = strong_confirmation(df_ltf, i, direction, sweeps, atr)
+        if strict and not (cand and ict):
+            continue
+        if cand and ict:
+            confluence = confluence + [f"Candle:{cand}", f"ICT:{ict}"]
 
         # Entry + dynamic stop + TP1/TP2 (shared builder)
         entry = cur_price
