@@ -58,6 +58,19 @@ workflow** once — that restarts it.
   starts if GitHub's scheduler is healthy. This is a strong, largely hands-off
   setup, but **not an absolute uptime guarantee.** For true 24/7 you'd want a VPS.
 
+## Deriv synthetics (optional, not enabled)
+
+`deriv_data.py` can pull Deriv's **Volatility 10/25/50/75/90/100** synthetics
+(symbols `R_10`, `R_25`, `R_50`, `R_75`, `R_90`, `R_100`) over Deriv's public
+WebSocket API (`pip install websocket-client`). To use them, add the symbols to
+`--symbols` and run `python signal_scanner.py --check-deriv` to test access.
+
+**They are intentionally NOT in the live scan**, because:
+- Deriv blocks datacenter IPs (Cloudflare 520) — verified from **GitHub Actions**,
+  so they can't be fetched from the runner. They may work from your own PC/VPS.
+- Deriv synthetics are random-walk generators: technical pattern signals on them
+  are noise by construction, not opportunities.
+
 ## Setup (one time)
 
 1. **Add your Telegram credentials as repo secrets** (Settings → Secrets and
