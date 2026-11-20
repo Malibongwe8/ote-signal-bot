@@ -1,0 +1,25 @@
+name: Deriv connectivity check
+
+# Manual, one-shot check that the GitHub runner can reach Deriv's API and pull
+# the Volatility 10/25/50/75/90/100 synthetics. Reports the result to Telegram.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -q -r requirements.txt
+      - name: Check Deriv access
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+        run: |
+          python signal_scanner.py --check-deriv \
+            --telegram-token "$TG_TOKEN" --telegram-chat "$TG_CHAT"

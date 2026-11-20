@@ -32,6 +32,7 @@ from ote_strategy import (run_strategy, _atr, _fractal_swings, find_fvgs,
                           find_order_blocks, find_liquidity_sweeps,
                           htf_bias, in_killzone, ote_zones, price_in_ote, Trade,
                           ltf_structure_agrees, build_levels, strong_confirmation)
+from deriv_data import DERIV_SYMBOLS, fetch_deriv
 
 STATE_FILE = "scanner_state.json"
 LOG_FILE = "signals_log.jsonl"
@@ -98,6 +99,9 @@ def append_log(signal: dict):
 
 
 def fetch_recent(symbol: str, ltf: str, htf: str, period: str):
+    # Deriv synthetics come from a different data source (WebSocket API).
+    if symbol in DERIV_SYMBOLS:
+        return fetch_deriv(symbol, ltf, htf)
     df_ltf = yf.download(symbol, period=period, interval=ltf, progress=False,
                          auto_adjust=True)
     df_htf = yf.download(symbol, period=period, interval=htf, progress=False,
@@ -624,6 +628,8 @@ def main():
                     help="preview how signals are formatted (no real scan)")
     ap.add_argument("--commands", action="store_true",
                     help="poll Telegram for bot commands once and exit")
+    ap.add_argument("--check-deriv", action="store_true",
+                    help="verify Deriv synthetic-index data access and exit")
     ap.add_argument("--webhook", default=None)
     ap.add_argument("--telegram-token", default=None)
     ap.add_argument("--telegram-chat", default=None)
@@ -638,6 +644,15 @@ def main():
         timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip() in TF_CONFIG]
         handle_commands(args.telegram_token, args.telegram_chat,
                         {"symbols": symbols, "timeframes": timeframes, "rr": args.rr})
+        return
+
+    if args.check_deriv:
+        from deriv_data import check_connectivity, DERIV_SYMBOLS
+        print("Deriv symbols:", ", ".join(f"{k} ({v})" for k, v in DERIV_SYMBOLS.items()))
+        msg = check_connectivity()
+        print(msg)
+        if args.telegram_token and args.telegram_chat:
+            send_telegram_text(args.telegram_token, args.telegram_chat, msg)
         return
 
     if not acquire_lock():
