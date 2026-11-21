@@ -461,6 +461,19 @@ def handle_commands(token, chat, cfg):
         admins.add(str(chat))
     state = load_state()
     off = state.get("tg_offset", 0)
+    # The getUpdates offset is per-bot. If the token (bot) changed, the stored
+    # offset belongs to the previous bot and would silently suppress every new
+    # update. Detect the bot identity and reset the offset when it changes.
+    me = _tg_call(token, "getMe")
+    bot_id = str((me.get("result") or {}).get("id", "")) if me.get("ok") else ""
+    if not bot_id:
+        bot_id = str(state.get("tg_bot_id", ""))
+    if bot_id and str(state.get("tg_bot_id", "")) != bot_id:
+        if off:
+            print(f"  bot changed -> resetting command offset (was {off})")
+        off = 0
+    if bot_id:
+        state["tg_bot_id"] = bot_id
     handled = 0
     try:
         import urllib.request
