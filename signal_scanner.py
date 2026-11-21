@@ -794,6 +794,10 @@ def main():
         deadline = time.time() + args.max_runtime
         last_dispatch = time.time()
         scans = 0
+        cmd_cfg = {"symbols": symbols, "timeframes": timeframes, "rr": args.rr,
+                   "admins": [x.strip() for x in
+                              os.environ.get("TELEGRAM_ADMIN", "").split(",") if x.strip()],
+                   "autojoin": os.environ.get("TELEGRAM_AUTOJOIN", "1") != "0"}
         while time.time() < deadline:
             started = time.time()
             try:
@@ -808,7 +812,19 @@ def main():
             if time.time() - last_dispatch >= args.dispatch_every:
                 _dispatch_successor()
                 last_dispatch = time.time()
-            time.sleep(max(1, args.interval - (time.time() - started)))
+            # Wait until the next scan, but poll Telegram every few seconds so
+            # the bot stays responsive even when a scan is slow.
+            wait = max(1, args.interval - (time.time() - started))
+            slept = 0.0
+            while slept < wait:
+                chunk = min(10.0, wait - slept)
+                time.sleep(chunk)
+                slept += chunk
+                if args.telegram_token:
+                    try:
+                        handle_commands(args.telegram_token, args.telegram_chat, cmd_cfg)
+                    except Exception:
+                        pass
         print(f"Loop window finished after {scans} scans.")
         return
 
