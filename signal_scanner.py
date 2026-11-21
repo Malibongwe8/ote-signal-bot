@@ -375,6 +375,10 @@ HELP_TEXT = (
 )
 
 
+SAFE_COMMANDS = {"/id", "/help", "/start", "/status", "/positions",
+                 "/last", "/symbols", "/stats"}
+
+
 def _tg_call(token, method, **params):
     """Call any Telegram Bot API method. Returns the parsed JSON (or ok=False)."""
     try:
@@ -497,11 +501,13 @@ def handle_commands(token, chat, cfg):
         chat_id = str(msg.get("chat", {}).get("id", ""))
         sender = str((msg.get("from") or {}).get("id", ""))
         is_admin = (chat_id in admins) or (sender in admins)
-        if not is_admin:
-            continue
         parts = text.split()
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
+        if not is_admin and cmd not in SAFE_COMMANDS:
+            send_telegram_text(token, chat_id, "Admin-only command. Send /help.")
+            handled += 1
+            continue
 
         if cmd == "/id":
             send_telegram_text(token, chat_id, f"chat id: {chat_id}\nuser id: {sender}")
