@@ -355,15 +355,40 @@ def emit(signal: dict, webhook, tg_token, tg_chat, df_ltf=None):
 
 HELP_TEXT = (
     "OTE Signal Bot — commands\n"
-    "/status    — scanner status & open positions\n"
-    "/positions — list open trades\n"
-    "/last      — last 5 signals\n"
-    "/symbols   — instruments being scanned\n"
-    "/test      — send a sample signal with chart\n"
-    "/mute      — pause signal alerts\n"
-    "/unmute    — resume signal alerts\n"
-    "/help      — this message"
+    "Signals\n"
+    "  /status    — scanner status & open positions\n"
+    "  /positions — list open trades\n"
+    "  /last      — last 5 signals\n"
+    "  /symbols   — instruments being scanned\n"
+    "  /stats     — signal counts from the log\n"
+    "  /test      — send a sample signal with chart\n"
+    "Info\n"
+    "  /id        — show this chat / user id\n"
+    "  /help      — this message\n"
+    "Admin only\n"
+    "  /mute  /unmute       — pause / resume alerts\n"
+    "  /autojoin on|off     — auto-approve join requests\n"
+    "  /pending             — list recent join requests\n"
+    "  /approve <user_id>   — approve a join request\n"
+    "  /decline <user_id>   — decline a join request\n"
+    "  /broadcast <text>    — post a message to the channel\n"
 )
+
+
+def _tg_call(token, method, **params):
+    """Call any Telegram Bot API method. Returns the parsed JSON (or ok=False)."""
+    try:
+        import urllib.request
+        import urllib.parse
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        data = urllib.parse.urlencode(params).encode()
+        with urllib.request.urlopen(urllib.request.Request(url, data=data),
+                                    timeout=15) as r:
+            return json.loads(r.read().decode())
+    except Exception as e:
+        print(f"  (tg {method} failed: {e})", file=sys.stderr)
+        return {"ok": False, "description": str(e)}
+
 
 
 def _recent_signals(n=5):
@@ -409,6 +434,13 @@ def _command_reply(cmd, state, cfg):
             for s in sigs)
     if cmd == "/symbols":
         return "Scanning: " + ", ".join(cfg.get("symbols", []))
+    if cmd == "/stats":
+        sigs = _recent_signals(10_000)
+        from collections import Counter
+        c = Counter(s.get("type", "?") for s in sigs)
+        return (f"Logged signals: {len(sigs)} total "
+                f"(ENTRY {c.get('ENTRY',0)}, TP1 {c.get('TP1',0)}, "
+                f"EXIT {c.get('EXIT',0)})")
     if cmd == "/mute":
         return "Muted — no more signal alerts until /unmute."
     if cmd == "/unmute":
@@ -417,9 +449,12 @@ def _command_reply(cmd, state, cfg):
 
 
 def handle_commands(token, chat, cfg):
-    """Poll Telegram for new commands and reply. Returns how many were handled."""
-    if not (token and chat):
+    """Poll Telegram for commands + join requests, reply/act. Returns count."""
+    if not token:
         return 0
+    admins = {str(a) for a in cfg.get("admins", []) if str(a).strip()}
+    if chat:
+        admins.add(str(chat))
     state = load_state()
     off = state.get("tg_offset", 0)
     handled = 0
@@ -431,25 +466,86 @@ def handle_commands(token, chat, cfg):
     except Exception as e:
         print(f"  (command poll failed: {e})", file=sys.stderr)
         return 0
+
+    joins = state.get("joins", [])
+    autojoin = state.get("autojoin", cfg.get("autojoin", True))
+
     for upd in data.get("result", []):
         off = max(off, upd.get("update_id", 0) + 1)
-        msg = upd.get("message") or {}
+
+        # --- membership join requests ---
+        jr = upd.get("chat_join_request")
+        if jr:
+            frm = jr.get("from") or {}
+            uid = str(frm.get("id", ""))
+            jc = str((jr.get("chat") or {}).get("id", ""))
+            name = (frm.get("first_name", "") +
+                    (" @" + frm["username"] if frm.get("username") else "")).strip()
+            if autojoin and uid and jc:
+                res = _tg_call(token, "approveChatJoinRequest", chat_id=jc, user_id=uid)
+                status = "approved" if res.get("ok") else f"failed ({res.get('description')})"
+            else:
+                status = "pending"
+            joins.append({"uid": uid, "chat": jc, "name": name, "status": status})
+            handled += 1
+            continue
+
+        msg = upd.get("message") or upd.get("channel_post") or {}
         text = (msg.get("text") or "").strip()
         if not text.startswith("/"):
             continue
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        if chat_id and str(chat) and chat_id != str(chat):
+        sender = str((msg.get("from") or {}).get("id", ""))
+        is_admin = (chat_id in admins) or (sender in admins)
+        if not is_admin:
             continue
-        cmd = text.split()[0].lower().split("@")[0]
-        if cmd == "/test":
-            run_test(token, chat, None)
+        parts = text.split()
+        cmd = parts[0].lower().split("@")[0]
+        args = parts[1:]
+
+        if cmd == "/id":
+            send_telegram_text(token, chat_id, f"chat id: {chat_id}\nuser id: {sender}")
+        elif cmd == "/test":
+            run_test(token, chat_id, None)
+        elif cmd == "/broadcast":
+            if args:
+                send_telegram_text(token, chat, " ".join(args))
+                send_telegram_text(token, chat_id, "Posted to the channel.")
+            else:
+                send_telegram_text(token, chat_id, "Usage: /broadcast <text>")
+        elif cmd == "/autojoin":
+            on = (args[0].lower() in ("on", "1", "yes")) if args else (not autojoin)
+            state["autojoin"] = on
+            autojoin = on
+            send_telegram_text(token, chat_id,
+                               f"Auto-approve join requests: {'ON' if on else 'OFF'}")
+        elif cmd == "/pending":
+            pend = [j for j in joins if j["status"] == "pending"][-15:]
+            send_telegram_text(token, chat_id,
+                ("Pending join requests:\n" +
+                 "\n".join(f"{j['uid']} {j['name']}" for j in pend)) if pend
+                else "No pending join requests.")
+        elif cmd in ("/approve", "/decline"):
+            if not args:
+                send_telegram_text(token, chat_id, f"Usage: {cmd} <user_id>")
+            else:
+                uid = args[0]
+                jc = next((j["chat"] for j in reversed(joins) if j["uid"] == uid), chat)
+                method = ("approveChatJoinRequest" if cmd == "/approve"
+                          else "declineChatJoinRequest")
+                res = _tg_call(token, method, chat_id=jc, user_id=uid)
+                send_telegram_text(token, chat_id,
+                    f"{cmd[1:]} {uid}: " +
+                    ("ok" if res.get("ok") else str(res.get("description"))))
         elif cmd in ("/mute", "/unmute"):
             state["muted"] = (cmd == "/mute")
-            send_telegram_text(token, chat, _command_reply(cmd, state, cfg))
+            send_telegram_text(token, chat_id, _command_reply(cmd, state, cfg))
         else:
-            send_telegram_text(token, chat, _command_reply(cmd, state, cfg))
+            send_telegram_text(token, chat_id, _command_reply(cmd, state, cfg))
         handled += 1
+
     state["tg_offset"] = off
+    state["joins"] = joins[-50:]
     save_state(state)
     print(f"  commands handled: {handled}")
     return handled
@@ -459,7 +555,10 @@ def scan_once(symbols, timeframes, rr, min_confluence, webhook, tg_token, tg_cha
               strict=False):
     # Answer any pending bot commands first (so /status etc. are responsive).
     handle_commands(tg_token, tg_chat,
-                    {"symbols": symbols, "timeframes": timeframes, "rr": rr})
+                    {"symbols": symbols, "timeframes": timeframes, "rr": rr,
+                     "admins": [x.strip() for x in
+                                os.environ.get("TELEGRAM_ADMIN", "").split(",") if x.strip()],
+                     "autojoin": os.environ.get("TELEGRAM_AUTOJOIN", "1") != "0"})
     state = load_state()
     muted = state.get("muted", False)
     open_positions = state.get("open_positions", {})
